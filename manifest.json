@@ -1,0 +1,8 @@
+{
+  "type": "plugin",
+  "runner": "node",
+  "owner": "mh825",
+  "name": "telegram-rag-cache",
+  "description": "Telegram public channel RAG caching with configurable history windows (1w, 1m, 3m, 6m, 9m, 12m, 24m).",
+  "revision": 1
+}

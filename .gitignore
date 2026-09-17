@@ -1,0 +1,8 @@
+node_modules
+dist
+bundle.js
+.lmstudio
+plugin-data
+*.bak
+.env
+.env.*

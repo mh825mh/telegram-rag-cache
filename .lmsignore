@@ -1,0 +1,8 @@
+node_modules
+.lmstudio
+bundle.js
+test-build.js
+*.bak
+plugin-data
+.env
+.env.*
