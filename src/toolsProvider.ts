@@ -1,9 +1,10 @@
-import { tool, type ToolsProviderController } from "@lmstudio/sdk";
+import { tool, type ToolsProviderController, type InferParsedConfig } from "@lmstudio/sdk";
 import { z } from "zod";
 import * as fs from "fs";
 import * as path from "path";
 import * as os from "os";
 import * as https from "https";
+import { pluginConfigSchematics } from "./config.js";
 
 // ─── Constants ──────────────────────────────────────────────────────────
 
@@ -39,23 +40,32 @@ interface SearchResult {
 
 // ─── Config access ──────────────────────────────────────────────────────
 
-function getConfigValue(ctl: ToolsProviderController, key: string, fallback: unknown): unknown {
+interface PluginConfigValues {
+  historyWindow: string;
+  maxCachedMessages: number;
+  defaultFetchPages: number;
+  searchResultLimit: number;
+}
+
+const DEFAULT_CONFIG: PluginConfigValues = {
+  historyWindow: "1m",
+  maxCachedMessages: 5000,
+  defaultFetchPages: 5,
+  searchResultLimit: 10,
+};
+
+function getConfig(ctl: ToolsProviderController): PluginConfigValues {
   try {
-    const anyCtl = ctl as unknown as { 
-      pluginConfig?: { 
-        fields?: Array<{ key: string; value: unknown }> 
-      } 
+    const cfg: InferParsedConfig<typeof pluginConfigSchematics> = ctl.getPluginConfig(pluginConfigSchematics);
+    return {
+      historyWindow: cfg.get("historyWindow"),
+      maxCachedMessages: cfg.get("maxCachedMessages"),
+      defaultFetchPages: cfg.get("defaultFetchPages"),
+      searchResultLimit: cfg.get("searchResultLimit"),
     };
-    
-    const fields = anyCtl.pluginConfig?.fields;
-    if (Array.isArray(fields)) {
-      const field = fields.find((f) => f.key === key);
-      if (field && field.value !== undefined) {
-        return field.value;
-      }
-    }
-  } catch {}
-  return fallback;
+  } catch {
+    return { ...DEFAULT_CONFIG };
+  }
 }
 
 function windowToMs(window: string): number {
@@ -295,9 +305,10 @@ function searchInCache(cache: CacheData, query: string, limit: number, windowMs:
 // ─── Reusable fetch logic ───────────────────────────────────────────────
 
 async function fetchAndCacheChannel(ctl: ToolsProviderController, channel: string, maxPages?: number): Promise<Record<string, unknown>> {
-  const pages = maxPages ?? (getConfigValue(ctl, "defaultFetchPages", 5) as number);
-  const maxCached = getConfigValue(ctl, "maxCachedMessages", 5000) as number;
-  const historyWindow = getConfigValue(ctl, "historyWindow", "1m") as string;
+  const config = getConfig(ctl);
+  const pages = maxPages ?? config.defaultFetchPages;
+  const maxCached = config.maxCachedMessages;
+  const historyWindow = config.historyWindow;
   const windowMs = windowToMs(historyWindow);
   const cutoff = Date.now() - windowMs;
 
@@ -379,14 +390,14 @@ export async function toolsProvider(ctl: ToolsProviderController) {
         limit: z.number().int().min(1).max(50).optional().describe("Max results."),
       },
       implementation: async ({ channel, query, limit }) => {
-        const lim = limit ?? (getConfigValue(ctl, "searchResultLimit", 10) as number);
-        const historyWindow = getConfigValue(ctl, "historyWindow", "1m") as string;
-        const windowMs = windowToMs(historyWindow);
+        const config = getConfig(ctl);
+        const lim = limit ?? config.searchResultLimit;
+        const windowMs = windowToMs(config.historyWindow);
         const cache = readCache(channel);
         if (cache.messages.length === 0) return { channel, query, results: [], message: "Cache is empty." };
         const results = searchInCache(cache, query, lim, windowMs);
         return {
-          channel, query, historyWindow, totalCached: cache.messages.length, resultCount: results.length,
+          channel, query, historyWindow: config.historyWindow, totalCached: cache.messages.length, resultCount: results.length,
           results: results.map((r) => ({
             id: r.id, date: r.date, score: Number(r.score.toFixed(4)),
             text: r.text.length > 1200 ? r.text.slice(0, 1200) + "…" : r.text,
@@ -449,12 +460,12 @@ export async function toolsProvider(ctl: ToolsProviderController) {
       parameters: { channel: z.string().min(1).describe("Telegram public channel name") },
       implementation: async ({ channel }) => {
         const cache = readCache(channel);
-        const historyWindow = getConfigValue(ctl, "historyWindow", "1m") as string;
-        const windowMs = windowToMs(historyWindow);
+        const config = getConfig(ctl);
+        const windowMs = windowToMs(config.historyWindow);
         const cutoff = Date.now() - windowMs;
         const inWindow = cache.messages.filter((m) => m.timestamp >= cutoff).length;
         return {
-          channel, historyWindow, totalCached: cache.messages.length, inWindow,
+          channel, historyWindow: config.historyWindow, totalCached: cache.messages.length, inWindow,
           earliest: cache.messages.length > 0 ? cache.messages[0].date : null,
           latest: cache.messages.length > 0 ? cache.messages[cache.messages.length - 1].date : null,
           lastUpdated: cache.lastUpdated ? new Date(cache.lastUpdated).toISOString() : null,
@@ -507,7 +518,7 @@ export async function toolsProvider(ctl: ToolsProviderController) {
       },
     }),
 
-       tool({
+    tool({
       name: "telegram_clear_cache",
       description: "Delete the local cache file for a Telegram channel.",
       parameters: { channel: z.string().min(1).describe("Telegram public channel name") },
@@ -518,6 +529,20 @@ export async function toolsProvider(ctl: ToolsProviderController) {
       },
     }),
 
-      
+    tool({
+      name: "telegram_ping",
+      description: "Health check. Returns plugin status and the data directory.",
+      parameters: {},
+      implementation: async () => {
+        ensureDataDir();
+        const cachedChannels = fs.readdirSync(DATA_DIR).filter((f) => f.startsWith("cache_") && f.endsWith(".json")).length;
+        return {
+          status: "ok",
+          plugin: PLUGIN_NAME,
+          dataDirectory: DATA_DIR,
+          cachedChannels,
+        };
+      },
+    }),
   ];
 }

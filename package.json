@@ -1,9 +1,16 @@
-﻿{
+{
   "name": "telegram-rag-cache",
   "version": "1.0.0",
   "main": "bundle.js",
+  "scripts": {
+    "typecheck": "tsc --noEmit"
+  },
   "dependencies": {
     "@lmstudio/sdk": "^1.5.0",
     "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "@types/node": "^22.20.3",
+    "typescript": "^7.0.2"
   }
 }

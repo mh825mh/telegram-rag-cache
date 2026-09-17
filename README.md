@@ -10,7 +10,7 @@ Features
     Configurable History Windows: Choose to cache 1 week, 1 month, 3, 6, 9, 12, or 24 months of history.
     Lexical RAG Search: Uses term-frequency vectors and cosine similarity to find relevant messages, plus exact substring bonuses.
     Watchlist Automation: Maintain a list of channels and sync them all with a single command.
-    Zero External Dependencies: Uses only Node.js built-in modules (fs, path, os, https) and zod for schema validation.
+    Minimal Dependencies: Runtime logic uses only Node.js built-in modules (fs, path, os, https); schema validation uses zod via the LM Studio SDK.
 
 Configuration
 
@@ -69,3 +69,4 @@ This plugin strictly adheres to LM Studio SDK architecture rules:
     Tools use the tool() helper with plain Zod object parameters.
     Zero external npm dependencies for parsing/DB (custom regex and pure JS JSON wrappers).
     Uses __dirname / os.homedir() instead of import.meta.url.
+    Build requires @lmstudio/sdk and zod (compile with tsc, then run dev.js).
