@@ -6,3 +6,5 @@ plugin-data
 *.bak
 .env
 .env.*
+# CocoIndex Code (ccc)
+/.cocoindex_code/
