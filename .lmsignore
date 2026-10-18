@@ -6,3 +6,4 @@ test-build.js
 plugin-data
 .env
 .env.*
+.cocoindex_code
