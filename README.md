@@ -9,11 +9,13 @@ It uses Telegram's public web preview (`t.me/s/<channel>`), so no API keys or au
 - **No API Keys:** Scrapes public Telegram web previews.
 - **Local JSON Caching:** Stores messages in `~/.lmstudio/plugin-data/telegram-rag-cache/`. No external databases required.
 - **Configurable History Windows:** Cache 1 week, 1 month, 3, 6, 9, 12, or 24 months of history.
-- **Lexical RAG Search:** BM25 scoring with smoothed IDF, 2-character technical token support (`ai`, `js`, `v2`...), CJK bigram tokenization, and bounded exact-substring bonuses.
+- **Lexical RAG Search:** BM25 scoring with smoothed IDF, 2-character technical token support (`ai`, `js`, `v2`...), single-digit preservation (`qwen 3`), CJK bigram tokenization, and bounded exact-substring bonuses with deterministic tie-breaking.
 - **Multi-Channel Search:** `telegram_search_all` ranks results across a channel list, your watchlist, or every cached channel with one query.
 - **Smart Incremental Sync:** Stops paging early once the fetch reaches the newest already-cached message (`latestId`), avoiding redundant HTTP requests. Opt out with `forceFullPages`.
-- **Resilient Scraping:** Automatic retry with exponential backoff for timeouts, socket errors, HTTP 429, and 5xx responses. Media-only posts (photos, videos, polls, documents) are indexed via fallback captions so their IDs and timestamps are never dropped.
-- **Atomic Storage:** Cache and watchlist files are written via temp-file + rename, and carry a `schemaVersion` field for safe future migrations.
+- **Resilient Scraping:** Retry with exponential backoff for timeouts, socket errors, HTTP 429, and 5xx responses, with redirect-aware fetching. Media-only posts (photos, videos, polls, documents) are indexed via fallback captions — poll posts capture the question text (`[Poll] ...`) — so their IDs and timestamps are never dropped.
+- **Robust HTML Parsing:** Balanced-div extraction handles nested message markup, reply-preview blocks are stripped so quoted text is never mistaken for the post body, and full HTML entity decoding (named, decimal, and hex) keeps message text clean.
+- **Self-Healing Cache:** Older cache files are normalized on read — channel names are canonicalized, per-message channel stamps are rewritten, and missing `earliestId`/`latestId` fields are backfilled.
+- **Atomic Storage:** Cache and watchlist files are written via temp-file + rename, and carry a `schemaVersion` field for safe future migrations. Invalid watchlist entries are dropped instead of silently mangled.
 - **Full-Text Ergonomics:** Optional `fullText` parameter disables the 1200-character truncation on search and recent-message results.
 - **Watchlist Automation:** Maintain a channel list and sync everything with a single command.
 - **Minimal Dependencies:** Runtime logic uses only Node.js built-ins (`fs`, `path`, `os`, `https`); schema validation uses `zod` via the LM Studio SDK.
@@ -45,7 +47,7 @@ In LM Studio, open the plugin settings to configure:
 | `telegram_clear_cache` | Deletes the local cache file for a specific channel. |
 | `telegram_ping` | Health check. Returns plugin status and the data directory. |
 
-All channel-accepting tools normalize input automatically: `@name`, `t.me/name`, `t.me/s/name`, and full `https://t.me/s/name?before=...` URLs are all accepted.
+All channel-accepting tools normalize input automatically: `@name`, `t.me/name`, `t.me/s/name`, `telegram.me/name`, and full `https://t.me/s/name?before=...` URLs (including URL fragments and extra path segments) are all accepted.
 
 ## Usage Examples
 

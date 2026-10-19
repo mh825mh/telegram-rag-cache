@@ -1,4 +1,4 @@
-﻿import { tool, type ToolsProviderController, type InferParsedConfig } from "@lmstudio/sdk";
+import { tool, type ToolsProviderController, type InferParsedConfig } from "@lmstudio/sdk";
 import { z } from "zod";
 import * as fs from "fs";
 import * as path from "path";
@@ -6,14 +6,14 @@ import * as os from "os";
 import * as https from "https";
 import { pluginConfigSchematics } from "./config.js";
 
-// â”€â”€â”€ Constants â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// --- Constants ---------------------------------------------------------------
 
 const PLUGIN_NAME = "telegram-rag-cache";
 const DATA_DIR = path.join(os.homedir(), ".lmstudio", "plugin-data", PLUGIN_NAME);
 const DAY_MS = 24 * 60 * 60 * 1000;
 const CACHE_SCHEMA_VERSION = 1;
 
-// â”€â”€â”€ Types â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// --- Types -------------------------------------------------------------------
 
 interface TelegramMessage {
   id: number;
@@ -40,7 +40,7 @@ interface SearchResult {
   score: number;
 }
 
-// â”€â”€â”€ Config access â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// --- Config access -----------------------------------------------------------
 
 interface PluginConfigValues {
   historyWindow: string;
@@ -83,7 +83,7 @@ function windowToMs(window: string): number {
   }
 }
 
-// â”€â”€â”€ Input normalization â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// --- Input normalization -----------------------------------------------------
 
 function normalizeChannelInput(raw: string): string {
   if (!raw || typeof raw !== "string") {
@@ -92,19 +92,24 @@ function normalizeChannelInput(raw: string): string {
   let s = raw.trim();
   s = s.replace(/^@/, "");
   s = s.replace(/^https?:\/\//i, "");
-  s = s.replace(/^t\.me\//i, "");
+  s = s.replace(/^(?:www\.)?(?:t\.me|telegram\.me|telegram\.dog)\//i, "");
   s = s.replace(/^s\//i, "");
   const qIndex = s.indexOf("?");
   if (qIndex >= 0) s = s.slice(0, qIndex);
-  s = s.replace(/\/+$/, "");
+  const hashIndex = s.indexOf("#");
+  if (hashIndex >= 0) s = s.slice(0, hashIndex);
+  s = s.replace(/^\/+|\/+$/g, "");
+  if (s.includes("/")) {
+    s = s.split("/")[0];
+  }
   s = s.toLowerCase();
   if (!/^[a-z0-9_]{3,64}$/.test(s)) {
-    throw new Error("Invalid channel name after normalization. Use a valid public channel name.");
+    throw new Error(`Invalid channel name "${raw}" after normalization. Use a valid public channel handle (3-64 alphanumeric/underscore chars).`);
   }
   return s;
 }
 
-// â”€â”€â”€ Atomic storage & IO â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// --- Atomic storage & IO -----------------------------------------------------
 
 function ensureDataDir(): void {
   if (!fs.existsSync(DATA_DIR)) {
@@ -146,11 +151,11 @@ function readCache(channel: string): CacheData {
     const parsed = JSON.parse(raw) as CacheData;
     if (!parsed || !Array.isArray(parsed.messages)) return empty;
     return {
-      channel: parsed.channel || normalized,
-      messages: parsed.messages,
+      channel: normalized,
+      messages: parsed.messages.map((m) => ({ ...m, channel: normalized })),
       lastUpdated: parsed.lastUpdated || 0,
-      earliestId: parsed.earliestId || 0,
-      latestId: parsed.latestId || 0,
+      earliestId: parsed.earliestId || (parsed.messages.length > 0 ? parsed.messages[0].id : 0),
+      latestId: parsed.latestId || (parsed.messages.length > 0 ? parsed.messages[parsed.messages.length - 1].id : 0),
       schemaVersion: parsed.schemaVersion || CACHE_SCHEMA_VERSION,
     };
   } catch {
@@ -182,12 +187,12 @@ function readWatchlist(): string[] {
     const parsed = JSON.parse(raw);
     if (Array.isArray(parsed)) {
       return parsed
-        .filter((c) => typeof c === "string")
+        .filter((c): c is string => typeof c === "string")
         .map((c) => {
           try {
             return normalizeChannelInput(c);
           } catch {
-            return c.toLowerCase().replace(/[^a-z0-9_]/g, "");
+            return "";
           }
         })
         .filter((c) => c.length >= 3);
@@ -204,7 +209,7 @@ function writeWatchlist(channels: string[]): void {
       try {
         return normalizeChannelInput(c);
       } catch {
-        return c.toLowerCase().replace(/[^a-z0-9_]/g, "");
+        return "";
       }
     })
     .filter((c) => c.length >= 3);
@@ -212,7 +217,7 @@ function writeWatchlist(channels: string[]): void {
   atomicWriteFileSync(getWatchlistPath(), JSON.stringify(unique, null, 2));
 }
 
-// â”€â”€â”€ HTTP fetch & HTML parsing â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// --- HTTP fetch & HTML parsing -----------------------------------------------
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -220,6 +225,37 @@ function sleep(ms: number): Promise<void> {
 
 function jitter(ms: number): number {
   return ms + Math.random() * ms * 0.3;
+}
+
+function httpGetOnce(
+  url: string,
+  headers: Record<string, string>,
+  redirectsLeft: number,
+): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    const req = https.get(url, { headers }, (res) => {
+      if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+        res.resume();
+        if (redirectsLeft <= 0) return reject(new Error("Too many redirects"));
+        const next = res.headers.location.startsWith("http")
+          ? res.headers.location
+          : new URL(res.headers.location, url).toString();
+        httpGetOnce(next, headers, redirectsLeft - 1).then(resolve).catch(reject);
+        return;
+      }
+      if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
+        res.resume();
+        reject(new Error(`HTTP ${res.statusCode} for ${url}`));
+        return;
+      }
+      const chunks: Buffer[] = [];
+      res.on("data", (c: Buffer) => chunks.push(c));
+      res.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
+      res.on("error", reject);
+    });
+    req.on("error", reject);
+    req.setTimeout(15000, () => req.destroy(new Error("Request timeout")));
+  });
 }
 
 async function httpGet(
@@ -231,40 +267,17 @@ async function httpGet(
   let lastError: unknown;
   for (let attempt = 1; attempt <= maxAttempts; attempt++) {
     try {
-      return await new Promise<string>((resolve, reject) => {
-        const req = https.get(url, { headers }, (res) => {
-          if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-            res.resume();
-            if (maxRedirects <= 0) return reject(new Error("Too many redirects"));
-            const next = res.headers.location.startsWith("http")
-              ? res.headers.location
-              : new URL(res.headers.location, url).toString();
-            httpGet(next, headers, maxRedirects - 1, maxAttempts).then(resolve).catch(reject);
-            return;
-          }
-          if (!res.statusCode || res.statusCode < 200 || res.statusCode >= 300) {
-            res.resume();
-            reject(new Error(`HTTP ${res.statusCode} for ${url}`));
-            return;
-          }
-          const chunks: Buffer[] = [];
-          res.on("data", (c: Buffer) => chunks.push(c));
-          res.on("end", () => resolve(Buffer.concat(chunks).toString("utf8")));
-          res.on("error", reject);
-        });
-        req.on("error", reject);
-        req.setTimeout(15000, () => req.destroy(new Error("Request timeout")));
-      });
+      return await httpGetOnce(url, headers, maxRedirects);
     } catch (e) {
       lastError = e;
       const msg = e instanceof Error ? e.message : String(e);
       const retriable =
-        e instanceof Error && (e.message === "Request timeout" || /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up/i.test(e.message)) ||
+        msg === "Request timeout" ||
+        /ECONNRESET|ECONNREFUSED|ETIMEDOUT|EAI_AGAIN|socket hang up/i.test(msg) ||
         /HTTP 429/.test(msg) ||
         /HTTP 5\d\d/.test(msg);
       if (attempt < maxAttempts && retriable) {
-        const backoff = jitter(500 * Math.pow(2, attempt - 1));
-        await sleep(backoff);
+        await sleep(jitter(500 * Math.pow(2, attempt - 1)));
         continue;
       }
       throw e;
@@ -275,40 +288,75 @@ async function httpGet(
 
 function decodeHtmlEntities(text: string): string {
   return text
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&#039;/g, "'");
+    .replace(/&nbsp;/gi, " ")
+    .replace(/&amp;/gi, "&")
+    .replace(/&lt;/gi, "<")
+    .replace(/&gt;/gi, ">")
+    .replace(/&quot;/gi, '"')
+    .replace(/&#0*39;/g, "'")
+    .replace(/&apos;/gi, "'")
+    .replace(/&#x([0-9a-fA-F]+);/g, (_, hex: string) => {
+      const code = parseInt(hex, 16);
+      return !isNaN(code) ? String.fromCodePoint(code) : _;
+    })
+    .replace(/&#(\d+);/g, (_, dec: string) => {
+      const code = parseInt(dec, 10);
+      return !isNaN(code) ? String.fromCodePoint(code) : _;
+    });
 }
 
 function stripHtml(html: string): string {
-  return html
+  const withoutTags = html
     .replace(/<br\s*\/?\s*>/gi, "\n")
     .replace(/<\/p>/gi, "\n")
     .replace(/<\/div>/gi, "\n")
-    .replace(/<[^>]+>/g, "")
-    .replace(/&nbsp;/g, " ")
-    .replace(/&amp;/g, "&")
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .replace(/&#039;/g, "'")
+    .replace(/<[^>]+>/g, "");
+  return decodeHtmlEntities(withoutTags)
     .replace(/[ \t]+\n/g, "\n")
     .replace(/\n[ \t]+/g, "\n")
     .replace(/\n{3,}/g, "\n\n")
     .trim();
 }
 
+function extractBalancedDivs(htmlSlice: string, openDivRegex: RegExp): string[] {
+  const extracted: string[] = [];
+  const flags = openDivRegex.flags.includes("g") ? openDivRegex.flags : openDivRegex.flags + "g";
+  const matcher = new RegExp(openDivRegex.source, flags);
+  let match: RegExpExecArray | null;
+
+  while ((match = matcher.exec(htmlSlice)) !== null) {
+    const contentStart = match.index + match[0].length;
+    const tagScanner = /<\/?div\b[^>]*>/gi;
+    tagScanner.lastIndex = contentStart;
+    let depth = 1;
+    let tagMatch: RegExpExecArray | null;
+
+    while (depth > 0 && (tagMatch = tagScanner.exec(htmlSlice)) !== null) {
+      if (tagMatch[0].startsWith("</")) {
+        depth--;
+        if (depth === 0) {
+          extracted.push(htmlSlice.slice(contentStart, tagMatch.index));
+          matcher.lastIndex = tagScanner.lastIndex;
+          break;
+        }
+      } else if (!tagMatch[0].endsWith("/>")) {
+        depth++;
+      }
+    }
+  }
+  return extracted;
+}
+
 function extractFallbackText(slice: string): string {
+  const pollQuestion = extractBalancedDivs(slice, /<div\s+class="[^"]*\btgme_widget_message_poll_question\b[^"]*"[^>]*>/i);
+  if (pollQuestion.length > 0) {
+    return `[Poll] ${stripHtml(pollQuestion[0])}`;
+  }
   const forwarded = slice.match(/data-peer-title="([^"]+)"/);
   if (forwarded) return `[Forwarded: ${decodeHtmlEntities(forwarded[1])}]`;
   const mediaTypes = [
-    { re: /data-photo="[^"]+"/, tag: "[Photo]" },
-    { re: /data-video="[^"]+"/, tag: "[Video]" },
+    { re: /tgme_widget_message_photo|data-photo="[^"]+"/, tag: "[Photo]" },
+    { re: /tgme_widget_message_video|data-video="[^"]+"/, tag: "[Video]" },
     { re: /tgme_widget_message_poll/, tag: "[Poll]" },
     { re: /tgme_widget_message_document/, tag: "[Document]" },
     { re: /tgme_widget_message_audio/, tag: "[Audio]" },
@@ -328,36 +376,42 @@ interface ParsedMessagesResult {
 function parseMessages(html: string, expectedChannel: string): ParsedMessagesResult {
   const messages: TelegramMessage[] = [];
   const postRegex = /data-post="([^"]+)\/(\d+)"/g;
-  const marks: Array<{ channel: string; id: number; index: number }> = [];
+  const marks: Array<{ id: number; index: number }> = [];
   let m: RegExpExecArray | null;
   while ((m = postRegex.exec(html)) !== null) {
-    const post = m[1];
-    const idStr = m[2];
-    const slashIdx = post.lastIndexOf("/");
-    const msgChannel = slashIdx >= 0 ? post.slice(0, slashIdx) : post;
-    const msgId = parseInt(idStr, 10);
+    const msgId = parseInt(m[2], 10);
     if (!isNaN(msgId)) {
-      marks.push({ channel: msgChannel, id: msgId, index: m.index + m[0].length });
+      marks.push({ id: msgId, index: m.index + m[0].length });
     }
   }
 
   for (let i = 0; i < marks.length; i++) {
-    const { channel: msgChannel, id: msgId, index: startIdx } = marks[i];
+    const { id: msgId, index: startIdx } = marks[i];
     const endIdx = i + 1 < marks.length ? marks[i + 1].index : html.length;
-    const slice = html.slice(startIdx, endIdx);
+    const rawSlice = html.slice(startIdx, endIdx);
 
-    let text = "";
-    const textMatch = slice.match(/<div class="tgme_widget_message_text[^"]*"[^>]*>([\s\S]*?)<\/div>/);
-    if (textMatch) {
-      text = stripHtml(textMatch[1]);
+    // Strip replied-to preview blocks so reply text isn't mistaken for the main post body
+    const sliceWithoutReply = rawSlice.replace(/<a\s+class="[^"]*\btgme_widget_message_reply\b[^"]*"[\s\S]*?<\/a>/gi, "");
+
+    let textParts = extractBalancedDivs(
+      sliceWithoutReply,
+      /<div\s+class="[^"]*\btgme_widget_message_text\b[^"]*\bjs-message_text\b[^"]*"[^>]*>/i,
+    );
+    if (textParts.length === 0) {
+      textParts = extractBalancedDivs(
+        sliceWithoutReply,
+        /<div\s+class="[^"]*\btgme_widget_message_text\b[^"]*"[^>]*>/i,
+      );
     }
+
+    let text = textParts.map(stripHtml).filter(Boolean).join("\n\n");
     if (!text) {
-      text = extractFallbackText(slice);
+      text = extractFallbackText(rawSlice);
     }
 
     let timestamp = Date.now();
     let date = new Date().toISOString();
-    const timeMatch = slice.match(/<time datetime="([^"]+)"/);
+    const timeMatch = rawSlice.match(/<time[^>]*datetime="([^"]+)"/i);
     if (timeMatch) {
       const parsed = Date.parse(timeMatch[1]);
       if (!isNaN(parsed)) {
@@ -367,7 +421,7 @@ function parseMessages(html: string, expectedChannel: string): ParsedMessagesRes
     }
 
     if (text.length > 0) {
-      messages.push({ id: msgId, channel: expectedChannel || msgChannel, text, timestamp, date });
+      messages.push({ id: msgId, channel: expectedChannel, text, timestamp, date });
     }
   }
 
@@ -400,7 +454,7 @@ async function fetchPage(
   return { messages, minId, maxId, anomalyDetected: parsed.anomalyDetected };
 }
 
-// â”€â”€â”€ Tokenization & BM25 search â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// --- Tokenization & BM25 search ----------------------------------------------
 
 function tokenizeLatinCyrillic(text: string): string[] {
   const tokens: string[] = [];
@@ -408,8 +462,8 @@ function tokenizeLatinCyrillic(text: string): string[] {
   let m: RegExpExecArray | null;
   while ((m = regex.exec(text)) !== null) {
     const t = m[0].toLowerCase();
-    if (/\d/.test(t) && t.length < 2) continue;
-    if (!/\d/.test(t) && t.length === 1) continue;
+    // Drop single-character non-numeric tokens; preserve single digits (e.g. "3" in "qwen 3") and 2+ char tokens
+    if (t.length === 1 && !/^\d$/.test(t)) continue;
     tokens.push(t);
   }
   return tokens;
@@ -493,7 +547,8 @@ function searchDocs(
   if (docs.length === 0) return [];
   const queryTokens = tokenize(query);
   const queryTf = buildTf(queryTokens);
-  const queryTerms = queryTokens.filter((t) => t.length >= 2);
+  const uniqueQuerySubstrings = Array.from(new Set(queryTokens.filter((t) => t.length >= 3)));
+  const rawLowerQuery = query.trim().toLowerCase();
 
   const docCount = docs.length;
   let totalLen = 0;
@@ -502,12 +557,8 @@ function searchDocs(
 
   const dfs = new Map<string, number>();
   for (const d of docs) {
-    const seen = new Set<string>();
     for (const [term] of d.tf) {
-      if (!seen.has(term)) {
-        seen.add(term);
-        dfs.set(term, (dfs.get(term) || 0) + 1);
-      }
+      dfs.set(term, (dfs.get(term) || 0) + 1);
     }
   }
   const idf = computeIdf(dfs, docCount);
@@ -516,12 +567,18 @@ function searchDocs(
   for (const d of docs) {
     let score = bm25Score(d.tf, queryTf, idf, d.tokens.length, avgDocLen);
     const lowerText = d.msg.text.toLowerCase();
-    let bonus = 0;
-    for (const qt of queryTerms) {
-      if (lowerText.includes(qt)) bonus += 0.15;
+
+    if (score > 0 || (rawLowerQuery.length >= 3 && lowerText.includes(rawLowerQuery))) {
+      let bonus = 0;
+      if (rawLowerQuery.length >= 3 && lowerText.includes(rawLowerQuery)) {
+        bonus += 0.15;
+      }
+      for (const qt of uniqueQuerySubstrings) {
+        if (lowerText.includes(qt)) bonus += 0.1;
+      }
+      score += Math.min(bonus, 0.25);
     }
-    bonus = Math.min(bonus, 0.25);
-    score += bonus;
+
     if (score > 0.001) {
       results.push({
         id: d.msg.id,
@@ -532,7 +589,7 @@ function searchDocs(
       });
     }
   }
-  results.sort((a, b) => b.score - a.score);
+  results.sort((a, b) => b.score - a.score || b.id - a.id);
   return results.slice(0, limit);
 }
 
@@ -560,7 +617,7 @@ function searchInCacheAll(caches: CacheData[], query: string, limit: number, win
   return searchDocs(docs, query, limit);
 }
 
-// â”€â”€â”€ Reusable fetch logic â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// --- Reusable fetch logic ----------------------------------------------------
 
 async function fetchAndCacheChannel(
   ctl: ToolsProviderController,
@@ -588,7 +645,7 @@ async function fetchAndCacheChannel(
   while (pagesFetched < pages && !stop) {
     try {
       const page = await fetchPage(normalized, beforeId);
-      if (page.anomalyDetected) {
+      if (page.anomalyDetected && pagesFetched === 0) {
         parseAnomaly = true;
       }
       if (page.messages.length === 0) {
@@ -655,17 +712,17 @@ async function fetchAndCacheChannel(
     earliest: deduped.length > 0 ? deduped[0].date : null,
     latest: deduped.length > 0 ? deduped[deduped.length - 1].date : null,
     ...(lastError ? { warning: `Stopped early: ${lastError}` } : {}),
-    ...(parseAnomaly ? { parseAnomaly: true } : {}),
+    ...(parseAnomaly ? { parseAnomaly: true, warning: "Channel HTML loaded (>5KB) but zero messages matched parser selectors." } : {}),
   };
 }
 
 function formatText(text: string, fullText: boolean): string {
   if (fullText) return text;
-  if (text.length > 1200) return text.slice(0, 1200) + "â€¦";
+  if (text.length > 1200) return text.slice(0, 1200) + "\u2026";
   return text;
 }
 
-// â”€â”€â”€ Tools provider â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€â”€
+// --- Tools provider ----------------------------------------------------------
 
 export async function toolsProvider(ctl: ToolsProviderController) {
   return [
@@ -673,7 +730,7 @@ export async function toolsProvider(ctl: ToolsProviderController) {
       name: "telegram_fetch_channel",
       description: "Fetch recent messages from a public Telegram channel and merge them into the local RAG cache.",
       parameters: {
-        channel: z.string().min(1).describe("Telegram public channel name (without @, without t.me/ prefix)"),
+        channel: z.string().min(1).describe("Telegram public channel handle or t.me link"),
         maxPages: z.number().int().min(1).max(50).optional().describe("Max pages to fetch."),
         forceFullPages: z.boolean().optional().describe("Force full page scan without early stop by latestId"),
       },
@@ -686,7 +743,7 @@ export async function toolsProvider(ctl: ToolsProviderController) {
       name: "telegram_search",
       description: "Search the local RAG cache of a Telegram channel's messages using BM25 + IDF scoring.",
       parameters: {
-        channel: z.string().min(1).describe("Telegram public channel name"),
+        channel: z.string().min(1).describe("Telegram public channel handle or t.me link"),
         query: z.string().min(1).describe("Natural-language search query"),
         limit: z.number().int().min(1).max(50).optional().describe("Max results."),
         fullText: z.boolean().optional().describe("Return full text without truncation"),
@@ -738,7 +795,7 @@ export async function toolsProvider(ctl: ToolsProviderController) {
               try {
                 return normalizeChannelInput(c);
               } catch {
-                return c.toLowerCase().replace(/[^a-z0-9_]/g, "");
+                return "";
               }
             })
             .filter((c) => c.length >= 3);
@@ -754,9 +811,7 @@ export async function toolsProvider(ctl: ToolsProviderController) {
                 const raw = fs.readFileSync(path.join(DATA_DIR, f), "utf8");
                 const data = JSON.parse(raw) as CacheData;
                 if (data.channel) {
-                  try {
-                    targetChannels.push(normalizeChannelInput(data.channel));
-                  } catch {}
+                  targetChannels.push(normalizeChannelInput(data.channel));
                 }
               } catch {}
             }
@@ -791,7 +846,7 @@ export async function toolsProvider(ctl: ToolsProviderController) {
     tool({
       name: "telegram_watchlist_add",
       description: "Add a Telegram channel to the watchlist.json file for regular syncing.",
-      parameters: { channel: z.string().min(1).describe("Telegram public channel name") },
+      parameters: { channel: z.string().min(1).describe("Telegram public channel handle or t.me link") },
       implementation: async ({ channel }) => {
         const list = readWatchlist();
         const ch = normalizeChannelInput(channel);
@@ -807,7 +862,7 @@ export async function toolsProvider(ctl: ToolsProviderController) {
     tool({
       name: "telegram_watchlist_remove",
       description: "Remove a Telegram channel from the watchlist.json file.",
-      parameters: { channel: z.string().min(1).describe("Telegram public channel name") },
+      parameters: { channel: z.string().min(1).describe("Telegram public channel handle or t.me link") },
       implementation: async ({ channel }) => {
         const list = readWatchlist();
         const ch = normalizeChannelInput(channel);
@@ -840,7 +895,7 @@ export async function toolsProvider(ctl: ToolsProviderController) {
     tool({
       name: "telegram_cache_stats",
       description: "Return statistics about the local message cache for a Telegram channel.",
-      parameters: { channel: z.string().min(1).describe("Telegram public channel name") },
+      parameters: { channel: z.string().min(1).describe("Telegram public channel handle or t.me link") },
       implementation: async ({ channel }) => {
         const cache = readCache(channel);
         const config = getConfig(ctl);
@@ -863,7 +918,7 @@ export async function toolsProvider(ctl: ToolsProviderController) {
       name: "telegram_get_recent",
       description: "Return the most recent N cached messages for a Telegram channel, newest first.",
       parameters: {
-        channel: z.string().min(1).describe("Telegram public channel name"),
+        channel: z.string().min(1).describe("Telegram public channel handle or t.me link"),
         count: z.number().int().min(1).max(50).optional().describe("Number of messages. Default 10."),
         fullText: z.boolean().optional().describe("Return full text without truncation"),
       },
@@ -913,7 +968,7 @@ export async function toolsProvider(ctl: ToolsProviderController) {
     tool({
       name: "telegram_clear_cache",
       description: "Delete the local cache file for a Telegram channel.",
-      parameters: { channel: z.string().min(1).describe("Telegram public channel name") },
+      parameters: { channel: z.string().min(1).describe("Telegram public channel handle or t.me link") },
       implementation: async ({ channel }) => {
         const ch = normalizeChannelInput(channel);
         const p = getCachePath(ch);
