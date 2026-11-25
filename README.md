@@ -46,6 +46,13 @@ In LM Studio, open the plugin settings to configure:
 | `telegram_list_channels` | Lists all channels that have cached data on disk. |
 | `telegram_clear_cache` | Deletes the local cache file for a specific channel. |
 | `telegram_ping` | Health check. Returns plugin status and the data directory. |
+| `cache_info` | Read-only research contract version 1.0: cache availability, counts, and last recorded channel sync attempt. |
+| `search_cache` | Read-only BM25 search across cached channels; optional `limit`, ISO 8601 `since`, and channel-handle `source`. |
+| `get_cached_item` | Read-only bounded excerpt for an `itemId` in `channel/messageId` form. |
+
+The research provider identifies itself as `mh825/telegram-rag-cache`. Search hits and item lookups include a stable item ID, title, excerpt, cache timestamp, channel, original Telegram link, and publication timestamp when valid. `cachedAt` is the channel's recorded sync-attempt time, not proof of a successful refresh. The research tools do not fetch or write data. They return errors instead of hiding malformed caches or silently returning partial results; limits include 50 results, 32 MiB of cache files, 20,000 messages, and a two-second operation deadline. The deadline is checked during processing; synchronous JSON parsing and ranking steps cannot be interrupted until they return. Specify `source` to narrow large searches. Existing Telegram tools retain their prior behavior.
+
+Research integrations should call `cache_info` first, then `search_cache` with a query and optional source and ISO timestamp (for example, `2026-11-01T00:00:00Z`). Pass a returned `itemId`, such as `durov/123`, to `get_cached_item`. Cite the returned `sourceUrl` and check the source for context. An empty cache is available but has no items; a malformed or inaccessible cache produces an error. A client must have LM Studio's `plugins.use` permission for this plugin to start a tool session.
 
 All channel-accepting tools normalize input automatically: `@name`, `t.me/name`, `t.me/s/name`, `telegram.me/name`, and full `https://t.me/s/name?before=...` URLs (including URL fragments and extra path segments) are all accepted.
 
@@ -84,6 +91,10 @@ Runs one BM25 query across your watchlist (or every cached channel if the watchl
 - **Cache Files:** `~/.lmstudio/plugin-data/telegram-rag-cache/cache_<channel>.json`
 - **Watchlist:** `~/.lmstudio/plugin-data/telegram-rag-cache/watchlist.json`
 
+## Diagnostics
+
+LM Studio's plugin output includes structured `[telegram-rag-cache]` events for completed or interrupted syncs and research-tool operations. They record elapsed time, outcome, and an error category where applicable; sync events also include page and message counts. They do not include search queries, message text, channel names, item IDs, or raw error messages. Access-denied errors raised before LM Studio starts a tool session appear in LM Studio's authenticator logs rather than plugin output.
+
 ## Development
 
 This plugin adheres to the LM Studio SDK architecture rules:
@@ -103,6 +114,7 @@ Install dependencies and type-check:
 ```sh
 npm install
 npm run typecheck
+npm test
 ```
 
 ### Publishing to LM Studio Hub

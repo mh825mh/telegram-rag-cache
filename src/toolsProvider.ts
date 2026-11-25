@@ -13,6 +13,23 @@ const DATA_DIR = path.join(os.homedir(), ".lmstudio", "plugin-data", PLUGIN_NAME
 const DAY_MS = 24 * 60 * 60 * 1000;
 const CACHE_SCHEMA_VERSION = 1;
 
+function logDiagnostic(level: "info" | "warn", event: string, fields: Record<string, string | number | boolean>): void {
+  console[level](`[telegram-rag-cache] ${JSON.stringify({ event, ...fields })}`);
+}
+
+function errorCategory(error: unknown): string {
+  const message = error instanceof Error ? error.message : String(error);
+  if (/time limit|timeout/i.test(message)) return "timeout";
+  if (/limit exceeded/i.test(message)) return "limit_exceeded";
+  if (/invalid cache|invalid message|duplicate|cache changed/i.test(message)) return "invalid_cache";
+  if (/HTTP 429/i.test(message)) return "http_429";
+  if (/HTTP 5\d\d/i.test(message)) return "http_5xx";
+  if (/HTTP \d+/i.test(message)) return "http_error";
+  if (/EACCES|EPERM/i.test(message)) return "permission_denied";
+  if (/ECONN|ETIMEDOUT|EAI_AGAIN|socket hang up/i.test(message)) return "network_error";
+  return "other";
+}
+
 // --- Types -------------------------------------------------------------------
 
 interface TelegramMessage {
@@ -543,6 +560,7 @@ function searchDocs(
   docs: Array<{ msg: TelegramMessage; tf: Map<string, number>; tokens: string[] }>,
   query: string,
   limit: number,
+  deadline?: number,
 ): SearchResult[] {
   if (docs.length === 0) return [];
   const queryTokens = tokenize(query);
@@ -557,6 +575,7 @@ function searchDocs(
 
   const dfs = new Map<string, number>();
   for (const d of docs) {
+    if (deadline && Date.now() > deadline) throw new Error("Research search time limit exceeded");
     for (const [term] of d.tf) {
       dfs.set(term, (dfs.get(term) || 0) + 1);
     }
@@ -565,6 +584,7 @@ function searchDocs(
 
   const results: SearchResult[] = [];
   for (const d of docs) {
+    if (deadline && Date.now() > deadline) throw new Error("Research search time limit exceeded");
     let score = bm25Score(d.tf, queryTf, idf, d.tokens.length, avgDocLen);
     const lowerText = d.msg.text.toLowerCase();
 
@@ -625,6 +645,7 @@ async function fetchAndCacheChannel(
   maxPages?: number,
   forceFullPages?: boolean,
 ): Promise<Record<string, unknown>> {
+  const startedAt = Date.now();
   const config = getConfig(ctl);
   const pages = maxPages ?? config.defaultFetchPages;
   const maxCached = config.maxCachedMessages;
@@ -701,6 +722,13 @@ async function fetchAndCacheChannel(
   };
   writeCache(newCache);
 
+  const syncFields: Record<string, string | number | boolean> = {
+    durationMs: Date.now() - startedAt, pagesFetched, newMessages: newMessages.length,
+    cachedMessages: deduped.length, parseAnomaly, status: lastError ? "failed_or_partial" : parseAnomaly ? "parse_anomaly" : "completed",
+  };
+  if (lastError) syncFields.errorCategory = errorCategory(lastError);
+  logDiagnostic(lastError || parseAnomaly ? "warn" : "info", "sync_finished", syncFields);
+
   const inWindow = deduped.filter((m) => m.timestamp >= cutoff).length;
   return {
     channel: normalized,
@@ -722,10 +750,164 @@ function formatText(text: string, fullText: boolean): string {
   return text;
 }
 
+// The research contract is read-only. It deliberately reads the existing JSON
+// files rather than silently migrating or changing the behavior of other tools.
+const RESEARCH_CONTRACT_VERSION = "1.0";
+const RESEARCH_PLUGIN_ID = "mh825/telegram-rag-cache";
+const RESEARCH_TIMEOUT_MS = 2000;
+const RESEARCH_MAX_BYTES = 32 * 1024 * 1024;
+const RESEARCH_MAX_MESSAGES = 20000;
+
+async function withResearchDeadline<T>(operation: string, work: (deadline: number) => Promise<T>): Promise<T> {
+  const startedAt = Date.now();
+  const deadline = Date.now() + RESEARCH_TIMEOUT_MS;
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const result = await Promise.race([
+      work(deadline),
+      new Promise<never>((_, reject) => {
+        timer = setTimeout(() => reject(new Error("Research operation time limit exceeded")), RESEARCH_TIMEOUT_MS);
+      }),
+    ]);
+    logDiagnostic("info", "research_finished", { operation, status: "completed", durationMs: Date.now() - startedAt });
+    return result;
+  } catch (error) {
+    logDiagnostic("warn", "research_finished", { operation, status: "failed", durationMs: Date.now() - startedAt, errorCategory: errorCategory(error) });
+    throw error;
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
+}
+
+function checkResearchDeadline(deadline: number): void {
+  if (Date.now() > deadline) throw new Error("Research operation time limit exceeded");
+}
+
+async function readResearchCaches(deadline: number, source?: string): Promise<CacheData[]> {
+  let files: string[];
+  try {
+    files = (await fs.promises.readdir(DATA_DIR)).filter((f) => /^cache_[a-z0-9_]+\.json$/i.test(f)).sort();
+  } catch (e) {
+    if ((e as NodeJS.ErrnoException).code === "ENOENT") return [];
+    throw e;
+  }
+  const target = source === undefined ? undefined : normalizeChannelInput(source);
+  if (!target && files.length > 1000) throw new Error("Research source limit exceeded; specify a source");
+  const caches: CacheData[] = [];
+  const seenChannels = new Set<string>();
+  let bytes = 0;
+  let messages = 0;
+  for (const file of files) {
+    checkResearchDeadline(deadline);
+    const fileChannel = normalizeChannelInput(file.slice(6, -5));
+    if (target && fileChannel !== target) continue;
+    if (seenChannels.has(fileChannel)) throw new Error(`Duplicate cache files for channel: ${fileChannel}`);
+    seenChannels.add(fileChannel);
+    const filePath = path.join(DATA_DIR, file);
+    const stat = await fs.promises.stat(filePath);
+    bytes += stat.size;
+    if (bytes > RESEARCH_MAX_BYTES) throw new Error("Research cache size limit exceeded; specify a source");
+    const raw = await fs.promises.readFile(filePath, "utf8");
+    if (Buffer.byteLength(raw, "utf8") > stat.size) throw new Error(`Cache changed while reading: ${file}`);
+    checkResearchDeadline(deadline);
+    let data: CacheData;
+    try { data = JSON.parse(raw) as CacheData; } catch { throw new Error(`Invalid cache JSON: ${file}`); }
+    if (!data || !Array.isArray(data.messages) || typeof data.channel !== "string" || normalizeChannelInput(data.channel) !== fileChannel) {
+      throw new Error(`Invalid cache structure: ${file}`);
+    }
+    messages += data.messages.length;
+    if (messages > RESEARCH_MAX_MESSAGES) throw new Error("Research message limit exceeded; specify a source");
+    const ids = new Set<number>();
+    for (const msg of data.messages) {
+      checkResearchDeadline(deadline);
+      if (!msg || !Number.isSafeInteger(msg.id) || msg.id <= 0 || typeof msg.text !== "string" || !Number.isFinite(msg.timestamp) || typeof msg.date !== "string") {
+        throw new Error(`Invalid message in cache: ${file}`);
+      }
+      if (ids.has(msg.id)) throw new Error(`Duplicate message ID in cache: ${file}`);
+      ids.add(msg.id);
+      msg.channel = fileChannel;
+    }
+    data.channel = fileChannel;
+    caches.push(data);
+  }
+  return caches;
+}
+
+function researchHit(msg: TelegramMessage, cache: CacheData) {
+  const title = msg.text.split(/\r?\n/, 1)[0].trim().slice(0, 120) || `Telegram post ${msg.id}`;
+  const cachedDate = new Date(cache.lastUpdated);
+  const cachedAt = cache.lastUpdated > 0 && Number.isFinite(cachedDate.getTime()) ? cachedDate.toISOString() : null;
+  return {
+    pluginId: RESEARCH_PLUGIN_ID,
+    itemId: `${msg.channel}/${msg.id}`,
+    title,
+    excerpt: formatText(msg.text, false),
+    cachedAt,
+    source: msg.channel,
+    sourceUrl: `https://t.me/${msg.channel}/${msg.id}`,
+    ...(Number.isFinite(Date.parse(msg.date)) ? { publishedAt: new Date(msg.date).toISOString() } : {}),
+  };
+}
+
 // --- Tools provider ----------------------------------------------------------
 
 export async function toolsProvider(ctl: ToolsProviderController) {
   return [
+    tool({
+      name: "cache_info",
+      description: "Read-only research cache status (contract version 1.0).",
+      parameters: {},
+      implementation: async () => withResearchDeadline("cache_info", async (deadline) => {
+        const caches = await readResearchCaches(deadline);
+        const updated = caches.map((c) => c.lastUpdated).filter((n) => n > 0 && Number.isFinite(new Date(n).getTime()));
+        return { contractVersion: RESEARCH_CONTRACT_VERSION, pluginId: RESEARCH_PLUGIN_ID, available: true, sourceCount: caches.length,
+          itemCount: caches.reduce((n, c) => n + c.messages.length, 0),
+          latestCachedAt: updated.length ? new Date(Math.max(...updated)).toISOString() : null,
+          freshnessNote: "Cache timestamps reflect channel sync attempts, not verified successful refreshes." };
+      }),
+    }),
+    tool({
+      name: "search_cache",
+      description: "Search cached Telegram posts read-only (contract version 1.0). Source is a channel handle; since is an ISO timestamp.",
+      parameters: {
+        query: z.string().trim().min(1).max(256),
+        limit: z.number().int().min(1).max(50).optional(),
+        since: z.string().datetime({ offset: true }).optional(),
+        source: z.string().min(1).max(256).optional(),
+      },
+      implementation: async ({ query, limit, since, source }) => withResearchDeadline("search_cache", async (deadline) => {
+        const caches = await readResearchCaches(deadline, source);
+        const cutoff = since ? Date.parse(since) : -Infinity;
+        const docs: Array<{ msg: TelegramMessage; tf: Map<string, number>; tokens: string[] }> = [];
+        const byId = new Map<string, { msg: TelegramMessage; cache: CacheData }>();
+        for (const cache of caches) for (const msg of cache.messages) {
+          checkResearchDeadline(deadline);
+          if (msg.timestamp < cutoff) continue;
+          const tokens = tokenize(msg.text);
+          docs.push({ msg, tokens, tf: buildTf(tokens) });
+          byId.set(`${msg.channel}/${msg.id}`, { msg, cache });
+        }
+        const results = searchDocs(docs, query, limit ?? 10, deadline).map((r) => {
+          const item = byId.get(`${r.channel}/${r.id}`)!;
+          return { ...researchHit(item.msg, item.cache), score: Number(r.score.toFixed(4)) };
+        });
+        return { contractVersion: RESEARCH_CONTRACT_VERSION, results };
+      }),
+    }),
+    tool({
+      name: "get_cached_item",
+      description: "Read a bounded excerpt and source details for a channel/id item (contract version 1.0).",
+      parameters: { itemId: z.string().max(100).regex(/^[a-z0-9_]{3,64}\/[1-9][0-9]*$/) },
+      implementation: async ({ itemId }) => withResearchDeadline("get_cached_item", async (deadline) => {
+        const [channel, id] = itemId.split("/");
+        const caches = await readResearchCaches(deadline, channel);
+        for (const cache of caches) {
+          const msg = cache.messages.find((m) => String(m.id) === id);
+          if (msg) return { contractVersion: RESEARCH_CONTRACT_VERSION, item: researchHit(msg, cache) };
+        }
+        return { contractVersion: RESEARCH_CONTRACT_VERSION, item: null };
+      }),
+    }),
     tool({
       name: "telegram_fetch_channel",
       description: "Fetch recent messages from a public Telegram channel and merge them into the local RAG cache.",
